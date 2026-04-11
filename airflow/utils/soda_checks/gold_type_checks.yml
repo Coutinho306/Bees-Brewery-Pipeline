@@ -1,0 +1,7 @@
+checks for brewery_type_summary:
+  - row_count >= 3
+  - missing_count(brewery_type) = 0
+  - duplicate_count(brewery_type) = 0
+  - schema:
+      fail:
+        when required column missing: [brewery_type, count]

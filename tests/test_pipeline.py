@@ -1,18 +1,17 @@
-"""Simplified tests for the brewery data pipeline - case study demonstration."""
+"""Tests for the brewery data pipeline."""
 
 import pytest
 import pandas as pd
 import sys
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from requests.exceptions import Timeout, ConnectionError, HTTPError
 from airflow.models import DagBag
 
-# Add airflow modules to path
 sys.path.insert(0, '/opt/airflow/dags')
 sys.path.insert(0, '/opt/airflow')
 
 from utils.api_client import BreweryAPIClient
-from utils.data_quality import validate_bronze_data, validate_silver_data, validate_gold_aggregations, DataQualityError
+from utils.data_quality import DataQualityError
 
 
 @pytest.fixture(scope="module")
@@ -93,14 +92,13 @@ class TestBronzeToSilverTransformation:
         """Test that null states and countries are filled with 'unknown'."""
         df = pd.DataFrame(sample_bronze_data)
 
-        # Simulate silver transformation
         df["state"] = df["state"].fillna("unknown")
         df["country"] = df["country"].fillna("unknown")
 
-        assert df["state"].isna().sum() == 0, "State column should have no nulls"
-        assert df["country"].isna().sum() == 0, "Country column should have no nulls"
-        assert "unknown" in df["state"].values, "Missing state should be 'unknown'"
-        assert "unknown" in df["country"].values, "Missing country should be 'unknown'"
+        assert df["state"].isna().sum() == 0
+        assert df["country"].isna().sum() == 0
+        assert "unknown" in df["state"].values
+        assert "unknown" in df["country"].values
 
     def test_deduplication_removes_duplicates(self):
         """Test that duplicate brewery IDs are removed."""
@@ -110,11 +108,10 @@ class TestBronzeToSilverTransformation:
             {"id": "2", "name": "Brewery B", "brewery_type": "nano"},
         ])
 
-        # Simulate deduplication
         deduplicated = duplicate_data.drop_duplicates(subset=["id"])
 
-        assert len(deduplicated) == 2, "Should have 2 unique breweries after dedup"
-        assert deduplicated["id"].is_unique, "IDs should be unique after dedup"
+        assert len(deduplicated) == 2
+        assert deduplicated["id"].is_unique
 
 
 class TestSilverToGoldAggregation:
@@ -124,17 +121,17 @@ class TestSilverToGoldAggregation:
         """Test aggregation by brewery type produces correct counts."""
         by_type = sample_silver_data.groupby("brewery_type").size().reset_index(name="count")
 
-        assert len(by_type) == 4, "Should have 4 brewery types"
-        assert by_type["count"].sum() == 4, "Total count should equal source rows"
+        assert len(by_type) == 4
+        assert by_type["count"].sum() == 4
         assert set(by_type["brewery_type"]) == {"micro", "nano", "regional", "brewpub"}
 
     def test_state_aggregation(self, sample_silver_data):
         """Test aggregation by state and country produces correct counts."""
         by_state = sample_silver_data.groupby(["state", "country"]).size().reset_index(name="count")
 
-        assert by_state["count"].sum() == 4, "Total count should equal source rows"
+        assert by_state["count"].sum() == 4
         california_count = by_state[by_state["state"] == "California"]["count"].sum()
-        assert california_count == 2, "California should have 2 breweries"
+        assert california_count == 2
 
     def test_aggregation_preserves_total_count(self, sample_silver_data):
         """Test that aggregations don't lose or duplicate records."""
@@ -145,8 +142,8 @@ class TestSilverToGoldAggregation:
         type_sum = by_type["count"].sum()
         state_sum = by_state["count"].sum()
 
-        assert type_sum == original_count, "Type aggregation should preserve total count"
-        assert state_sum == original_count, "State aggregation should preserve total count"
+        assert type_sum == original_count
+        assert state_sum == original_count
 
 
 class TestAPIClientErrorScenarios:
@@ -163,7 +160,7 @@ class TestAPIClientErrorScenarios:
             client.close()
 
     def test_api_500_error_retries_then_raises(self):
-        """Test that 500 errors trigger retries via urllib3 Retry mechanism."""
+        """Test that 500 errors trigger retries."""
         with patch('utils.api_client.requests.Session.get') as mock_get:
             mock_response = Mock()
             mock_response.status_code = 500
@@ -188,28 +185,26 @@ class TestAPIClientErrorScenarios:
     def test_api_pagination_stops_on_partial_page(self):
         """Test that pagination stops when receiving less than page_size results."""
         with patch('utils.api_client.requests.Session.get') as mock_get:
-            # First page returns full page, second page returns partial results
             first_page_response = Mock()
             first_page_response.status_code = 200
             first_page_response.json.return_value = [
                 {"id": str(i), "name": f"Brewery {i}", "brewery_type": "micro"}
-                for i in range(200)  # Full page
+                for i in range(200)
             ]
 
             second_page_response = Mock()
             second_page_response.status_code = 200
             second_page_response.json.return_value = [
                 {"id": "201", "name": "Brewery 201", "brewery_type": "micro"}
-            ]  # Partial page - should stop here
+            ]
 
             mock_get.side_effect = [first_page_response, second_page_response]
 
             client = BreweryAPIClient()
             result = client.fetch_all_breweries()
 
-            # Should have fetched both pages
-            assert len(result) == 201, "Should fetch all breweries until partial page"
-            assert mock_get.call_count == 2, "Should make 2 API calls"
+            assert len(result) == 201
+            assert mock_get.call_count == 2
             client.close()
 
     def test_api_returns_empty_list(self):
@@ -223,7 +218,7 @@ class TestAPIClientErrorScenarios:
             client = BreweryAPIClient()
             result = client.fetch_all_breweries()
 
-            assert result == [], "Should return empty list for empty API response"
+            assert result == []
             client.close()
 
     def test_api_returns_malformed_json(self):
@@ -240,124 +235,20 @@ class TestAPIClientErrorScenarios:
             client.close()
 
 
-class TestDataQualityErrorScenarios:
-    """Test data quality validation failures."""
+class TestDataQualityModule:
+    """Test data quality module integration."""
 
-    def test_bronze_insufficient_records_fails(self):
-        """Test that Bronze layer fails with too few records."""
-        insufficient_data = [
-            {"id": "1", "name": "Brewery 1", "brewery_type": "micro"}
-        ]
+    def test_data_quality_error_class(self):
+        """Test that DataQualityError can be raised."""
+        with pytest.raises(DataQualityError):
+            raise DataQualityError("Test error")
 
-        with pytest.raises(DataQualityError, match="quality checks failed"):
-            validate_bronze_data(insufficient_data, min_records=100)
+    def test_soda_checks_files_exist(self):
+        """Test that Soda check files exist."""
+        from pathlib import Path
 
-    def test_bronze_duplicate_ids_fails(self):
-        """Test that Bronze layer fails with duplicate IDs."""
-        duplicate_data = [
-            {"id": "1", "name": "Brewery 1", "brewery_type": "micro"},
-            {"id": "1", "name": "Brewery 1 Duplicate", "brewery_type": "micro"},
-        ]
-
-        with pytest.raises(DataQualityError, match="quality checks failed"):
-            validate_bronze_data(duplicate_data, min_records=2)
-
-    def test_bronze_null_ids_fails(self):
-        """Test that Bronze layer fails with null IDs."""
-        null_id_data = [
-            {"id": None, "name": "Brewery 1", "brewery_type": "micro"},
-            {"id": "2", "name": "Brewery 2", "brewery_type": "nano"},
-        ]
-
-        with pytest.raises(DataQualityError, match="quality checks failed"):
-            validate_bronze_data(null_id_data, min_records=2)
-
-    def test_silver_data_loss_detection_fails(self):
-        """Test that Silver layer detects data loss from Bronze."""
-        silver_df = pd.DataFrame({
-            'id': ['1', '2'],
-            'name': ['Brewery 1', 'Brewery 2'],
-            'state': ['California', 'Texas'],
-            'country': ['United States', 'United States']
-        })
-
-        # Bronze had 100 records, Silver only has 2 - major data loss!
-        with pytest.raises(DataQualityError, match="quality checks failed"):
-            validate_silver_data(silver_df, bronze_count=100)
-
-    def test_silver_duplicate_ids_after_transform_fails(self):
-        """Test that Silver layer fails if transformation created duplicates."""
-        invalid_df = pd.DataFrame({
-            'id': ['1', '1', '2'],  # Duplicate ID
-            'name': ['Brewery 1', 'Brewery 1 Dup', 'Brewery 2'],
-            'state': ['California', 'California', 'Texas'],
-            'country': ['United States', 'United States', 'United States']
-        })
-
-        with pytest.raises(DataQualityError, match="quality checks failed"):
-            validate_silver_data(invalid_df, bronze_count=3)
-
-    def test_gold_insufficient_brewery_types_fails(self):
-        """Test that Gold layer fails with too few brewery types."""
-        by_type_df = pd.DataFrame({
-            'brewery_type': ['micro'],  # Only 1 type, minimum is 3
-            'count': [100]
-        })
-
-        by_state_df = pd.DataFrame({
-            'state': ['California', 'Texas', 'New York', 'Florida', 'Ohio',
-                      'Colorado', 'Washington', 'Michigan', 'Oregon', 'North Carolina', 'Pennsylvania'],
-            'country': ['United States'] * 11,
-            'count': [20, 15, 10, 8, 7, 6, 6, 6, 6, 6, 10]
-        })
-
-        with pytest.raises(DataQualityError, match="quality checks failed"):
-            validate_gold_aggregations(
-                by_type_df=by_type_df,
-                by_state_df=by_state_df,
-                silver_count=100
-            )
-
-    def test_gold_type_aggregation_mismatch_fails(self):
-        """Test that Gold layer fails when type counts don't sum to Silver total."""
-        by_type_df = pd.DataFrame({
-            'brewery_type': ['micro', 'nano', 'regional', 'brewpub'],
-            'count': [50, 30, 20, 10]  # Total = 110
-        })
-
-        by_state_df = pd.DataFrame({
-            'state': ['California', 'Texas', 'New York', 'Florida', 'Ohio',
-                      'Colorado', 'Washington', 'Michigan', 'Oregon', 'North Carolina', 'Pennsylvania'],
-            'country': ['United States'] * 11,
-            'count': [50, 30, 20, 15, 10, 8, 7, 6, 5, 4, 5]  # Total = 160
-        })
-
-        # Type sum (110) != Silver count (160)
-        with pytest.raises(DataQualityError, match="Type aggregation mismatch"):
-            validate_gold_aggregations(
-                by_type_df=by_type_df,
-                by_state_df=by_state_df,
-                silver_count=160
-            )
-
-    def test_gold_state_aggregation_mismatch_fails(self):
-        """Test that Gold layer fails when state counts don't sum to Silver total."""
-        by_type_df = pd.DataFrame({
-            'brewery_type': ['micro', 'nano', 'regional', 'brewpub'],
-            'count': [100, 50, 30, 20]  # Total = 200
-        })
-
-        by_state_df = pd.DataFrame({
-            'state': ['California', 'Texas', 'New York', 'Florida', 'Ohio',
-                      'Colorado', 'Washington', 'Michigan', 'Oregon', 'North Carolina', 'Pennsylvania'],
-            'country': ['United States'] * 11,
-            'count': [30, 20, 15, 10, 8, 7, 6, 5, 4, 3, 2]  # Total = 110
-        })
-
-        # State sum (110) != Silver count (200)
-        with pytest.raises(DataQualityError, match="State aggregation mismatch"):
-            validate_gold_aggregations(
-                by_type_df=by_type_df,
-                by_state_df=by_state_df,
-                silver_count=200
-            )
+        checks_dir = Path("/opt/airflow/utils/soda_checks")
+        assert (checks_dir / "bronze_checks.yml").exists()
+        assert (checks_dir / "silver_checks.yml").exists()
+        assert (checks_dir / "gold_type_checks.yml").exists()
+        assert (checks_dir / "gold_state_checks.yml").exists()

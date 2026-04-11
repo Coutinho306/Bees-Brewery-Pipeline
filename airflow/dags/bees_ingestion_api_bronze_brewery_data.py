@@ -10,6 +10,7 @@ from utils.data_quality import validate_bronze_data
 
 logger = logging.getLogger(__name__)
 
+
 bronze_dataset = Dataset("file:///opt/airflow/data/bronze")
 
 
@@ -22,7 +23,7 @@ def on_failure_callback(context):
 
 def ingest_brewery_data(**context):
     """Fetch data from API and save as JSON."""
-    execution_date = context["ds"]
+    execution_date = context["data_interval_end"].strftime('%Y-%m-%d')
     logger.info(f"Bronze ingestion: {execution_date}")
 
     client = BreweryAPIClient()
@@ -38,20 +39,20 @@ def ingest_brewery_data(**context):
         json.dump(breweries, f)
 
     logger.info(f"Saved {len(breweries)} records to {output_file}")
-    return {"count": len(breweries), "file": str(output_file)}
+    return {"count": len(breweries), "file": str(output_file), "date": execution_date}
 
 
 def quality_check_bronze(**context):
     """Run data quality checks on bronze data."""
-    execution_date = context["ds"]
-    logger.info(f"Bronze quality check: {execution_date}")
-
     ti = context["ti"]
     ingest_result = ti.xcom_pull(task_ids="ingest_from_api")
     api_count = ingest_result.get("count") if ingest_result else None
+    current_date = ingest_result.get("date") if ingest_result else None
+
+    logger.info(f"Bronze quality check: {current_date}")
 
     bronze_path = Path("/opt/airflow/data/bronze")
-    bronze_file = bronze_path / execution_date / "breweries.json"
+    bronze_file = bronze_path / current_date / "breweries.json"
 
     with open(bronze_file, "r") as f:
         breweries = json.load(f)

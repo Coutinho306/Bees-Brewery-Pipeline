@@ -1,0 +1,7 @@
+checks for breweries_by_state:
+  - row_count >= 10
+  - missing_count(state) = 0
+  - missing_count(country) = 0
+  - schema:
+      fail:
+        when required column missing: [state, country, count]

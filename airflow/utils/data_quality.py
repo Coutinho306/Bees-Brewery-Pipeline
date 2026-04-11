@@ -1,8 +1,10 @@
-"""Data Quality Checks using Great Expectations for Brewery Pipeline."""
+"""Data Quality Checks using Soda Core for Brewery Pipeline."""
 import logging
 from typing import Dict, Any, Optional
+from pathlib import Path
+from soda.scan import Scan
+from pyspark.sql import DataFrame as SparkDataFrame, SparkSession
 import pandas as pd
-import great_expectations as gx
 
 logger = logging.getLogger(__name__)
 
@@ -12,164 +14,139 @@ class DataQualityError(Exception):
     pass
 
 
-def run_ge_validation(
-    data_source: str,
-    df: pd.DataFrame,
-    expectations: list
+def run_soda_scan(
+    spark: SparkSession,
+    df: SparkDataFrame,
+    table_name: str,
+    checks_file: str
 ) -> Dict[str, Any]:
     """
-    Run Great Expectations validation on DataFrame.
+    Run Soda data quality checks on Spark DataFrame.
 
     Args:
-        data_source: Name of the data source
-        df: DataFrame to validate
-        expectations: List of expectation configurations
+        spark: Spark session
+        df: Spark DataFrame to validate
+        table_name: Name to register the temp table
+        checks_file: Path to Soda checks YAML file
 
     Returns:
         Dictionary with validation results
 
     Raises:
-        DataQualityError: If critical checks fail
+        DataQualityError: If checks fail
     """
-    context = gx.get_context()
+    df.createOrReplaceTempView(table_name)
 
-    datasource = context.sources.add_or_update_pandas(name=f"{data_source}_source")
-    data_asset = datasource.add_dataframe_asset(name=f"{data_source}_asset")
-    batch_request = data_asset.build_batch_request(dataframe=df)
+    scan = Scan()
+    scan.set_scan_definition_name(f"{table_name}_scan")
+    scan.add_spark_session(spark, data_source_name="spark_df")
 
-    suite_name = f"{data_source}_suite"
-    context.add_or_update_expectation_suite(expectation_suite_name=suite_name)
+    checks_path = Path(__file__).parent / "soda_checks" / checks_file
+    scan.add_sodacl_yaml_file(str(checks_path))
 
-    validator = context.get_validator(
-        batch_request=batch_request,
-        expectation_suite_name=suite_name
-    )
+    scan.execute()
 
-    for exp in expectations:
-        exp_type = exp.pop("type")
-        getattr(validator, exp_type)(**exp)
+    # Get check results using Soda Core API
+    scan_results = scan.get_scan_results()
+    checks = scan_results.get('checks', [])
 
-    results = validator.validate()
+    passed = 0
+    failed = 0
+    warned = 0
 
-    failed_expectations = [
-        r for r in results.results
-        if not r.success
-    ]
+    for check in checks:
+        outcome = check.get('outcome')
+        if outcome == 'pass':
+            passed += 1
+        elif outcome == 'fail':
+            failed += 1
+        elif outcome == 'warn':
+            warned += 1
 
-    passed_count = len([r for r in results.results if r.success])
-    failed_count = len(failed_expectations)
+    total = passed + failed + warned
 
     result = {
-        "data_source": data_source,
-        "total_checks": len(results.results),
-        "passed": passed_count,
-        "failed": failed_count,
-        "success": results.success
+        "data_source": table_name,
+        "total_checks": total,
+        "passed": passed,
+        "failed": failed,
+        "warned": warned,
+        "success": failed == 0
     }
 
-    if not results.success:
-        logger.error(f"❌ {data_source} quality checks FAILED: {failed_count} failures")
-        for fail in failed_expectations:
-            logger.error(f"  - {fail.expectation_config.expectation_type}")
+    if failed > 0:
+        logger.error(f"❌ {table_name} quality checks FAILED: {failed} failures")
+        for check in checks:
+            if check.get('outcome') == 'fail':
+                logger.error(f"  - {check.get('name', 'unknown')}")
         raise DataQualityError(
-            f"{data_source}: {failed_count} quality checks failed"
+            f"{table_name}: {failed} quality checks failed"
         )
 
-    logger.info(f"✓ {data_source} quality checks passed: {passed_count}/{len(results.results)}")
+    logger.info(f"✓ {table_name} quality checks passed: {passed}/{total}")
     return result
 
 
 def validate_bronze_data(data: list, min_records: int = 100) -> Dict[str, Any]:
     """Validate bronze layer data quality."""
+    from utils.spark_utils import get_spark_session
+
     logger.info(f"Running Bronze quality checks on {len(data)} records")
 
-    df = pd.DataFrame(data)
+    spark = get_spark_session("BEES-Bronze-QualityCheck")
 
-    expectations = [
-        {"type": "expect_table_row_count_to_be_between", "min_value": min_records},
-        {"type": "expect_column_to_exist", "column": "id"},
-        {"type": "expect_column_to_exist", "column": "name"},
-        {"type": "expect_column_to_exist", "column": "brewery_type"},
-        {"type": "expect_column_values_to_not_be_null", "column": "id"},
-        {"type": "expect_column_values_to_be_unique", "column": "id"},
-    ]
-
-    return run_ge_validation("bronze", df, expectations)
+    try:
+        df = spark.createDataFrame(pd.DataFrame(data))
+        return run_soda_scan(spark, df, "breweries", "bronze_checks.yml")
+    finally:
+        spark.stop()
 
 
 def validate_silver_data(
-    df: pd.DataFrame,
+    df: SparkDataFrame,
     bronze_count: Optional[int] = None
 ) -> Dict[str, Any]:
     """Validate silver layer data quality."""
-    logger.info(f"Running Silver quality checks on {len(df)} records")
+    record_count = df.count()
+    logger.info(f"Running Silver quality checks on {record_count} records")
 
-    if bronze_count:
-        expectations = [
-            {"type": "expect_table_row_count_to_equal", "value": bronze_count},
-            {"type": "expect_column_to_exist", "column": "id"},
-            {"type": "expect_column_to_exist", "column": "state"},
-            {"type": "expect_column_to_exist", "column": "country"},
-            {"type": "expect_column_values_to_not_be_null", "column": "id"},
-            {"type": "expect_column_values_to_be_unique", "column": "id"},
-            {"type": "expect_column_values_to_not_be_null", "column": "state"},
-            {"type": "expect_column_values_to_not_be_null", "column": "country"},
-        ]
-    else:
-        expectations = [
-            {"type": "expect_table_row_count_to_be_between", "min_value": 100},
-            {"type": "expect_column_to_exist", "column": "id"},
-            {"type": "expect_column_to_exist", "column": "state"},
-            {"type": "expect_column_to_exist", "column": "country"},
-            {"type": "expect_column_values_to_not_be_null", "column": "id"},
-            {"type": "expect_column_values_to_be_unique", "column": "id"},
-            {"type": "expect_column_values_to_not_be_null", "column": "state"},
-            {"type": "expect_column_values_to_not_be_null", "column": "country"},
-        ]
+    # Use the Spark session from the DataFrame
+    spark = df.sparkSession
 
-    result = run_ge_validation("silver", df, expectations)
+    result = run_soda_scan(spark, df, "breweries", "silver_checks.yml")
 
     if bronze_count is not None:
+        if record_count != bronze_count:
+            raise DataQualityError(
+                f"Silver row count mismatch - expected {bronze_count}, got {record_count}"
+            )
         result["bronze_count"] = bronze_count
 
     return result
 
 
 def validate_gold_aggregations(
-    by_type_df: pd.DataFrame,
-    by_state_df: pd.DataFrame,
+    by_type_df: SparkDataFrame,
+    by_state_df: SparkDataFrame,
     silver_count: Optional[int] = None
 ) -> Dict[str, Any]:
     """Validate gold layer aggregations."""
     logger.info(f"Running Gold quality checks on aggregations")
 
-    type_max_value = silver_count - 1 if silver_count else None
-    type_expectations = [
-        {"type": "expect_table_row_count_to_be_between", "min_value": 3, "max_value": type_max_value} if type_max_value else {"type": "expect_table_row_count_to_be_between", "min_value": 3},
-        {"type": "expect_column_to_exist", "column": "brewery_type"},
-        {"type": "expect_column_to_exist", "column": "count"},
-        {"type": "expect_column_values_to_not_be_null", "column": "brewery_type"},
-        {"type": "expect_column_values_to_be_unique", "column": "brewery_type"},
-    ]
+    # Use the Spark session from the DataFrames
+    spark = by_type_df.sparkSession
 
-    type_result = run_ge_validation("gold_by_type", by_type_df, type_expectations)
+    type_result = run_soda_scan(
+        spark, by_type_df, "brewery_type_summary", "gold_type_checks.yml"
+    )
 
-    state_max_value = silver_count - 1 if silver_count else None
-    state_expectations = [
-        {"type": "expect_table_row_count_to_be_between", "min_value": 10, "max_value": state_max_value} if state_max_value else {"type": "expect_table_row_count_to_be_between", "min_value": 10},
-        {"type": "expect_column_to_exist", "column": "state"},
-        {"type": "expect_column_to_exist", "column": "country"},
-        {"type": "expect_column_to_exist", "column": "count"},
-        {"type": "expect_column_values_to_not_be_null", "column": "state"},
-        {"type": "expect_column_values_to_not_be_null", "column": "country"},
-        {"type": "expect_compound_columns_to_be_unique", "column_list": ["state", "country"]},
-    ]
-
-    state_result = run_ge_validation("gold_by_state", by_state_df, state_expectations)
+    state_result = run_soda_scan(
+        spark, by_state_df, "breweries_by_state", "gold_state_checks.yml"
+    )
 
     if silver_count is not None:
-        type_total = by_type_df["count"].sum()
-        state_total = by_state_df["count"].sum()
+        type_total = by_type_df.agg({"count": "sum"}).collect()[0][0]
+        state_total = by_state_df.agg({"count": "sum"}).collect()[0][0]
 
         if type_total != silver_count:
             raise DataQualityError(

@@ -1,0 +1,8 @@
+checks for breweries:
+  - missing_count(id) = 0
+  - missing_count(state) = 0
+  - missing_count(country) = 0
+  - duplicate_count(id) = 0
+  - schema:
+      fail:
+        when required column missing: [id, state, country]

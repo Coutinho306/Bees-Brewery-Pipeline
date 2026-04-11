@@ -4,24 +4,19 @@ Data engineering pipeline that ingests brewery data from Open Brewery DB API and
 
 ## Quick Start
 
-**Security Note:** The project uses a `.env` file for configuration. A proper Fernet key is required for Airflow encryption.
-
 ```bash
-1. Setup environment (update passwords in .env.example and copy to .env)
+1. Setup environment and generate Fernet key
+  cp .env.example .env && sed -i "s/AIRFLOW__CORE__FERNET_KEY=.*/AIRFLOW__CORE__FERNET_KEY=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')/" .env
 
 2. Start services
-docker-compose up -d
+  docker compose up -d
 
-3. Open Airflow UI
-http://localhost:8080
+3. Open Airflow UI at http://localhost:8080 (login: admin/admin)
 
-4. Trigger DAGs in order:
-    - bees_ingestion_api_bronze_brewery_data
-    - bees_ingestion_api_silver_brewery_data (auto-triggers from bronze dataset)
-    - bees_ingestion_api_gold_brewery_data (auto-triggers from silver dataset)
+4. Trigger the Bronze DAG (Silver and Gold auto-trigger via Dataset dependencies)
 
 5. Run tests
-./run_tests.sh
+  ./run_tests.sh
 ```
 
 ## Architecture
@@ -42,7 +37,7 @@ case_bees/
 ├── airflow/
 │   ├── dags/           # 3 DAGs (bronze, silver, gold)
 │   └── utils/          # API client, data quality checks
-├── tests/              # Pipeline tests (24 tests total)
+├── tests/              # Pipeline tests
 ├── data/               # Data lake (auto-generated)
 ├── .env.example        # Environment configuration template
 └── docker-compose.yml  # Docker setup
@@ -75,7 +70,7 @@ case_bees/
 
 ## Testing
 
-Comprehensive test suite with **24 tests** covering all pipeline components.
+Comprehensive test suite covering all pipeline components.
 
 **To run tests:**
 ```bash
@@ -86,10 +81,10 @@ docker-compose exec -u airflow airflow-scheduler python -m pytest tests/ -v
 ```
 
 **Test Coverage:**
-- ✅ DAG structure and integrity (5 tests)
-- ✅ Data transformations - Bronze → Silver → Gold (5 tests)
-- ✅ API client error scenarios (6 tests)
-- ✅ Data quality validation failures (8 tests)
+- ✅ DAG structure and integrity
+- ✅ Data transformations (Bronze → Silver → Gold logic)
+- ✅ API client error handling and retries
+- ✅ Data quality module integration
 
 See `tests/test_pipeline.py` for all test implementations.
 
@@ -97,11 +92,55 @@ See `tests/test_pipeline.py` for all test implementations.
 
 Detailed monitoring and alerting strategy available in [MONITORING.md](./MONITORING.md).
 
+## Design Decisions
+
+### Why PySpark for a Small Dataset?
+
+This project uses **PySpark** for data processing despite the brewery dataset being relatively small (~8k records). This is an **intentional architectural decision** to demonstrate production-ready patterns:
+
+#### Key Reasons:
+
+1. **Production-Ready Patterns**: The same code structure scales to billions of records without refactoring
+2. **Distributed Processing Concepts**: Demonstrates proper partitioning, schema management, and data optimization techniques used in real-world big data pipelines
+3. **Industry-Standard Tooling**: PySpark is the de facto standard for large-scale data processing in modern data platforms (Databricks, EMR, Dataproc)
+4. **Scalability Mindset**: Shows understanding that even small projects should follow patterns that work at scale
+5. **Portfolio Demonstration**: Aligns with big data engineering best practices from companies processing massive datasets
+
+#### Local Development Setup:
+
+- **Spark Local Mode**: Configured to run in `local[*]` mode within Docker containers
+- **Resource Optimization**: Tuned for containerized environments (2GB driver memory, 4 shuffle partitions)
+- **No Cluster Required**: Runs efficiently on a single machine for development and testing
+
+#### Production Deployment:
+
+In a production scenario with larger datasets, this architecture would seamlessly scale to distributed cluster processing (AWS EMR, Databricks, Google Dataproc) with **minimal code changes** - just configuration updates.
+
+### Architecture Pattern: Separation of Concerns
+
+The codebase follows a clean separation between **orchestration** and **business logic**:
+
+- **DAGs** (`airflow/dags/`): Thin orchestration layer handling Airflow context, XCom, and task dependencies
+- **Utils** (`airflow/utils/`): Business logic for transformations, data quality, and Spark operations
+- **Benefits**: Reusable code, easier testing, clearer responsibilities
+
+### Data Quality with Soda Core
+
+**Soda Core** handles data quality checks directly on Spark DataFrames without converting to Pandas. This approach provides:
+
+- **Native Spark Integration**: Runs quality checks on distributed data without collecting to driver
+- **YAML-based Checks**: Declarative data contracts stored as code in `utils/soda_checks/`
+- **Lightweight**: Minimal overhead compared to alternatives
+- **Production Pattern**: Same tooling used in modern data platforms
+
+Quality checks are defined per layer (Bronze, Silver, Gold) and automatically executed after each transformation.
+
 ## Technology Stack
 
 - Apache Airflow 2.8.0
 - Python 3.11
-- Pandas, PyArrow
-- Great Expectations
+- **PySpark 3.5.0** (distributed data processing)
+- PyArrow (Parquet I/O)
+- **Soda Core Spark 3.3.2** (data quality)
 - Docker, Docker Compose
 - pytest

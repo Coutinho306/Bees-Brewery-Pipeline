@@ -1,10 +1,10 @@
 """DAG Silver - Transformação (Dataset Consumer & Producer)."""
 import logging
-import pandas as pd
 from datetime import datetime
 from pathlib import Path
 from airflow import DAG, Dataset
 from airflow.operators.python import PythonOperator
+from utils.spark_transformations import transform_bronze_to_silver, read_silver_data
 from utils.data_quality import validate_silver_data
 
 logger = logging.getLogger(__name__)
@@ -14,47 +14,27 @@ silver_dataset = Dataset("file:///opt/airflow/data/silver")
 
 
 def transform_to_parquet(**context):
-    """Transform Bronze → Silver (JSON → Parquet)."""
-    execution_date = context["ds"]
+    """Orchestrate Bronze → Silver transformation."""
+    execution_date = context["data_interval_end"].strftime('%Y-%m-%d')
     logger.info(f"Silver transformation triggered: {execution_date}")
 
+    # Construct paths based on execution date
     bronze_file = Path(f"/opt/airflow/data/bronze/{execution_date}/breweries.json")
+    output_path = Path("/opt/airflow/data/silver") / execution_date
 
-    if not bronze_file.exists():
-        raise FileNotFoundError(f"Bronze data not found for {execution_date}: {bronze_file}")
+    # Execute transformation (business logic in utils)
+    result = transform_bronze_to_silver(bronze_file, output_path)
 
-    logger.info(f"Reading bronze data from: {bronze_file}")
-    df = pd.read_json(bronze_file)
-    bronze_count = len(df)
-    logger.info(f"Read {bronze_count} records from bronze")
-
-    # Fill only string columns with empty strings, leave numeric columns as NaN
-    string_columns = df.select_dtypes(include=['object']).columns
-    df[string_columns] = df[string_columns].fillna("")
-
-    df["state"] = df["state"].fillna("unknown")
-    df["country"] = df["country"].fillna("unknown")
-    df = df.drop_duplicates(subset=["id"])
-
-    silver_path = Path("/opt/airflow/data/silver")
-    output_path = silver_path / execution_date
-    df.to_parquet(
-        output_path,
-        engine="pyarrow",
-        partition_cols=["state", "country"],
-        compression="snappy",
-        index=False
-    )
-
-    logger.info(f"Saved {len(df)} records to {output_path}")
-    return {"count": len(df), "bronze_count": bronze_count, "path": str(output_path)}
+    logger.info(f"Transformation complete: {result['count']} records")
+    return result
 
 
 def quality_check_silver(**context):
-    """Run data quality checks on silver data."""
+    """Orchestrate Silver data quality checks."""
     execution_date = context["ds"]
     logger.info(f"Silver quality check: {execution_date}")
 
+    # Get transformation metadata from previous task via XCom
     ti = context["ti"]
     transform_result = ti.xcom_pull(task_ids="transform_to_parquet")
     silver_path = transform_result.get("path") if transform_result else None
@@ -63,9 +43,8 @@ def quality_check_silver(**context):
     if not silver_path:
         raise ValueError("Could not get silver path from transform task")
 
-    logger.info(f"Reading silver data from: {silver_path}")
-    df = pd.read_parquet(silver_path)
-
+    # Read silver data and run quality checks (business logic in utils)
+    df = read_silver_data(Path(silver_path))
     quality_result = validate_silver_data(df, bronze_count=bronze_count)
 
     logger.info(f"Quality check passed: {quality_result}")
